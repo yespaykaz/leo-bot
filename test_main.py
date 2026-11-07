@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import tempfile
 import unittest
@@ -7,8 +8,7 @@ from unittest.mock import AsyncMock
 
 from telegram import ReplyKeyboardMarkup
 from telegram.ext import ConversationHandler
-
-from main import Database, accepts_gender, main_menu, start
+from main import Database, accepts_gender, main_menu, start, submit_report
 
 
 def profile(
@@ -68,6 +68,65 @@ class DatabaseTests(unittest.TestCase):
         )
         self.database.record_action(101, 202, False)
         self.assertIsNone(self.database.next_profile(101, viewer))
+
+    def test_blocked_profiles_are_not_shown_to_either_user(self) -> None:
+        viewer = profile("Анна", "Женщина", "Мужчин")
+        candidate = profile("Илья", "Мужчина", "Женщин")
+        self.database.save_profile(101, viewer)
+        self.database.save_profile(202, candidate)
+
+        self.assertTrue(self.database.block_user(101, 202))
+        self.assertFalse(self.database.block_user(101, 202))
+        self.assertTrue(self.database.is_blocked_between(101, 202))
+        self.assertTrue(self.database.is_blocked_between(202, 101))
+        self.assertIsNone(self.database.next_profile(101, viewer))
+        self.assertIsNone(self.database.next_profile(202, candidate))
+
+    def test_reports_are_saved_once_without_hiding_the_reported_profile(self) -> None:
+        viewer = profile("Анна", "Женщина", "Мужчин")
+        candidate = profile("Илья", "Мужчина", "Женщин")
+        self.database.save_profile(101, viewer)
+        self.database.save_profile(202, candidate)
+
+        self.assertTrue(
+            self.database.record_report(101, 202, "Спам или мошенничество")
+        )
+        self.assertFalse(
+            self.database.record_report(101, 202, "Поддельная анкета")
+        )
+        self.assertEqual(
+            self.database.reports_for_review()[0]["reason"],
+            "Спам или мошенничество",
+        )
+        self.assertIsNone(self.database.next_profile(101, viewer))
+
+    def test_report_submission_does_not_message_reported_user(self) -> None:
+        self.database.save_profile(101, profile("Анна", "Женщина", "Мужчин"))
+        self.database.save_profile(202, profile("Илья", "Мужчина", "Женщин"))
+        query = SimpleNamespace(
+            data="report_reason:202:harassment",
+            answer=AsyncMock(),
+            edit_message_reply_markup=AsyncMock(),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(bot_data={"database": self.database}),
+            bot=SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock()),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=101),
+            effective_chat=SimpleNamespace(id=101),
+        )
+
+        asyncio.run(submit_report(update, context))
+
+        self.assertEqual(
+            self.database.reports_for_review()[0]["reported_id"],
+            202,
+        )
+        context.bot.send_message.assert_awaited_once()
+        self.assertEqual(context.bot.send_message.await_args.kwargs["chat_id"], 101)
+        context.bot.send_photo.assert_not_awaited()
 
     def test_profiles_must_be_compatible_in_both_directions(self) -> None:
         viewer = profile("Анна", "Женщина", "Мужчин")

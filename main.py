@@ -52,6 +52,13 @@ LOOKING_FOR_OPTIONS = {
     "women": "Женщин",
     "all": "Всех",
 }
+REPORT_REASONS = {
+    "spam": "Спам или мошенничество",
+    "harassment": "Оскорбления или домогательства",
+    "inappropriate": "Неприемлемый контент",
+    "fake_profile": "Поддельная анкета",
+    "other": "Другая причина",
+}
 
 
 def accepts_gender(preference: str, gender: str) -> bool:
@@ -117,6 +124,31 @@ class Database:
                     FOREIGN KEY (from_user_id) REFERENCES users (telegram_id)
                         ON DELETE CASCADE,
                     FOREIGN KEY (to_user_id) REFERENCES users (telegram_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS blocks (
+                    blocker_id INTEGER NOT NULL,
+                    blocked_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (blocker_id, blocked_id),
+                    CHECK (blocker_id != blocked_id),
+                    FOREIGN KEY (blocker_id) REFERENCES users (telegram_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (blocked_id) REFERENCES users (telegram_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS reports (
+                    reporter_id INTEGER NOT NULL,
+                    reported_id INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (reporter_id, reported_id),
+                    CHECK (reporter_id != reported_id),
+                    FOREIGN KEY (reporter_id) REFERENCES users (telegram_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (reported_id) REFERENCES users (telegram_id)
                         ON DELETE CASCADE
                 );
                 """
@@ -329,6 +361,62 @@ class Database:
             ).fetchone()
         return bool(row[0])
 
+    def block_user(self, blocker_id: int, blocked_id: int) -> bool:
+        """Block a profile; return False when it was already blocked."""
+        with closing(self.connect()) as connection:
+            with connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO blocks (blocker_id, blocked_id)
+                    VALUES (?, ?)
+                    ON CONFLICT (blocker_id, blocked_id) DO NOTHING
+                    """,
+                    (blocker_id, blocked_id),
+                )
+        return cursor.rowcount == 1
+
+    def record_report(
+        self,
+        reporter_id: int,
+        reported_id: int,
+        reason: str,
+    ) -> bool:
+        """Save a report for review without contacting the reported profile."""
+        with closing(self.connect()) as connection:
+            with connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO reports (reporter_id, reported_id, reason)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT (reporter_id, reported_id) DO NOTHING
+                    """,
+                    (reporter_id, reported_id, reason),
+                )
+        return cursor.rowcount == 1
+
+    def reports_for_review(self) -> list[dict[str, Any]]:
+        """Return stored reports without exposing them to reported users."""
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM reports ORDER BY created_at, reporter_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def is_blocked_between(self, first_user_id: int, second_user_id: int) -> bool:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM blocks
+                    WHERE (blocker_id = ? AND blocked_id = ?)
+                       OR (blocker_id = ? AND blocked_id = ?)
+                )
+                """,
+                (first_user_id, second_user_id, second_user_id, first_user_id),
+            ).fetchone()
+        return bool(row[0])
+
     def next_profile(
         self,
         viewer_id: int,
@@ -348,9 +436,20 @@ class Database:
                     WHERE from_user_id = ?
                       AND to_user_id = candidate.telegram_id
                   )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM blocks
+                    WHERE (blocker_id = ? AND blocked_id = candidate.telegram_id)
+                       OR (blocker_id = candidate.telegram_id AND blocked_id = ?)
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM reports
+                    WHERE reporter_id = ? AND reported_id = candidate.telegram_id
+                  )
                 ORDER BY RANDOM()
                 """,
-                (viewer_id, viewer_id),
+                (viewer_id, viewer_id, viewer_id, viewer_id, viewer_id),
             ).fetchall()
 
         for row in rows:
@@ -424,7 +523,39 @@ def profile_keyboard(profile_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"dislike:{profile_id}",
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    "Заблокировать",
+                    callback_data=f"block:{profile_id}",
+                ),
+                InlineKeyboardButton(
+                    "Пожаловаться",
+                    callback_data=f"report:{profile_id}",
+                ),
+            ],
             [InlineKeyboardButton("Premium", callback_data="premium")],
+        ]
+    )
+
+
+def report_reason_keyboard(profile_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    reason,
+                    callback_data=f"report_reason:{profile_id}:{key}",
+                )
+            ]
+            for key, reason in REPORT_REASONS.items()
+        ]
+        + [
+            [
+                InlineKeyboardButton(
+                    "Отмена",
+                    callback_data=f"report_cancel:{profile_id}",
+                )
+            ]
         ]
     )
 
@@ -856,6 +987,138 @@ async def show_premium(
         )
 
 
+async def block_profile(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user or not query.data:
+        return
+
+    try:
+        target_id = int(query.data.partition(":")[2])
+    except ValueError:
+        await query.answer("Анкета недоступна.", show_alert=True)
+        return
+
+    database = get_database(context)
+    if (
+        not database.get_user(user.id)
+        or not database.get_user(target_id)
+        or target_id == user.id
+    ):
+        await query.answer("Анкета недоступна.", show_alert=True)
+        return
+
+    added = database.block_user(user.id, target_id)
+    await query.answer(
+        "Анкета заблокирована." if added else "Эта анкета уже заблокирована."
+    )
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except TelegramError:
+        pass
+
+    chat = update.effective_chat
+    if chat:
+        await send_next_profile(chat.id, user.id, context)
+
+
+async def begin_report(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user or not query.data:
+        return
+
+    try:
+        target_id = int(query.data.partition(":")[2])
+    except ValueError:
+        await query.answer("Анкета недоступна.", show_alert=True)
+        return
+
+    database = get_database(context)
+    if (
+        not database.get_user(user.id)
+        or not database.get_user(target_id)
+        or target_id == user.id
+    ):
+        await query.answer("Анкета недоступна.", show_alert=True)
+        return
+
+    await query.answer()
+    await query.edit_message_reply_markup(
+        reply_markup=report_reason_keyboard(target_id)
+    )
+
+
+async def cancel_report(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    try:
+        target_id = int(query.data.partition(":")[2]) if query.data else 0
+    except ValueError:
+        target_id = 0
+    await query.answer("Отправка жалобы отменена.")
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=profile_keyboard(target_id) if target_id else None
+        )
+    except TelegramError:
+        pass
+
+
+async def submit_report(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user or not query.data:
+        return
+
+    _, _, payload = query.data.partition(":")
+    target_text, separator, reason_key = payload.partition(":")
+    try:
+        target_id = int(target_text)
+    except ValueError:
+        await query.answer("Анкета недоступна.", show_alert=True)
+        return
+
+    database = get_database(context)
+    reason = REPORT_REASONS.get(reason_key) if separator else None
+    if (
+        not reason
+        or not database.get_user(user.id)
+        or not database.get_user(target_id)
+        or target_id == user.id
+    ):
+        await query.answer("Анкета недоступна.", show_alert=True)
+        return
+
+    added = database.record_report(user.id, target_id, reason)
+    await query.answer(
+        "Жалоба отправлена на проверку."
+        if added
+        else "Вы уже отправляли жалобу на эту анкету."
+    )
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except TelegramError:
+        pass
+
+    chat = update.effective_chat
+    if chat:
+        await send_next_profile(chat.id, user.id, context)
+
+
 async def profile_action(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -880,6 +1143,7 @@ async def profile_action(
         or not viewer
         or not candidate
         or target_id == user.id
+        or database.is_blocked_between(user.id, target_id)
     ):
         await query.answer("Анкета недоступна.", show_alert=True)
         return
@@ -967,6 +1231,18 @@ def build_application(token: str) -> Application:
     )
     application.add_handler(
         MessageHandler(filters.Regex(r"^Premium$"), show_premium)
+    )
+    application.add_handler(
+        CallbackQueryHandler(block_profile, pattern=r"^block:\d+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(begin_report, pattern=r"^report:\d+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(submit_report, pattern=r"^report_reason:\d+:[a-z_]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(cancel_report, pattern=r"^report_cancel:\d+$")
     )
     application.add_handler(
         CallbackQueryHandler(profile_action, pattern=r"^(like|dislike):\d+$")
