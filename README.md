@@ -1,7 +1,7 @@
 # Leo Telegram Dating Bot
 
 A polling Telegram dating bot built with `python-telegram-bot`. It stores
-profiles and likes in the local SQLite database `leo.db`.
+profiles and likes in the local SQLite database `bot.db`.
 
 ## Run
 
@@ -12,8 +12,9 @@ profiles and likes in the local SQLite database `leo.db`.
    uv run python main.py
    ```
 
-The bot creates `leo.db` on first start. Do not commit the database or the
-Telegram token.
+The bot creates `bot.db` on first start. Existing profiles and likes in `leo.db`
+are copied into `bot.db` without deleting the old file. Do not commit either
+database or the Telegram token.
 
 ## Included
 
@@ -21,7 +22,7 @@ Telegram token.
 - Random compatible profiles with Like and Dislike actions
 - Mutual-like notifications to both users
 - Profile display and editing
-- Premium information: 1490 tg per week, contact `@leo_admin`
+- Premium information: 2000 tenge per week, contact `@leoqazaq`
 
 Run the local checks with:
 

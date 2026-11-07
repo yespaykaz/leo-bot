@@ -20,6 +20,9 @@ node_modules
 .venv/
 __pycache__/
 *.py[cod]
+bot.db
+bot.db-shm
+bot.db-wal
 leo.db
 leo.db-shm
 leo.db-wal

@@ -7,7 +7,7 @@ A Telegram dating bot with profile registration, random profile browsing, likes,
 - `uv run python main.py` — start the bot with Telegram long polling
 - `uv run python -m unittest -v` — run the local checks
 - Required secret: `TELEGRAM_TOKEN`
-- SQLite data is stored in `leo.db` (created on first run)
+- SQLite data is stored in `bot.db`; existing data is copied from `leo.db` without deleting it
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
@@ -34,13 +34,14 @@ A Telegram dating bot with profile registration, random profile browsing, likes,
 
 - Telegram Bot API long polling is used; no webhook server is required.
 - Profile photos are stored as Telegram `file_id` values, not downloaded image files.
-- Profile details and likes are persisted in the local SQLite database.
+- Profile details, likes, and search visibility are persisted in `bot.db`.
+- On first start with the new database name, existing records are copied from `leo.db`; the source file is kept.
 
 ## Product
 
 - Users register an adult dating profile, browse mutually compatible profiles, and like or pass.
 - A mutual like sends a notification to both users.
-- Premium information points users to `@leo_admin`; payment is not processed in the bot.
+- Premium information is 2000 tenge per week; users can contact `@leoqazaq`. Payment is not processed in the bot.
 
 ## User preferences
 

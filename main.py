@@ -14,7 +14,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     Update,
 )
 from telegram.constants import ParseMode
@@ -39,9 +38,9 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("leo_bot")
 
 CONSENT, NAME, AGE, GENDER, CITY, PHOTO, ABOUT, LOOKING_FOR = range(8)
-DB_PATH = Path(__file__).with_name("leo.db")
+DB_PATH = Path(__file__).with_name("bot.db")
 MUTUAL_LIKE_MESSAGE = "У ВАС ВЗАИМНАЯ СИМПАТИЯ!"
-PREMIUM_TEXT = "Premium стоит 1490 tg в неделю. Для подключения напишите @leo_admin."
+PREMIUM_TEXT = "Premium стоит 2000 тенге в неделю. Для подключения напишите @leoqazaq."
 
 GENDERS = {
     "man": "Мужчина",
@@ -68,8 +67,17 @@ def accepts_gender(preference: str, gender: str) -> bool:
 class Database:
     """Small SQLite data layer for profiles and one-time profile decisions."""
 
-    def __init__(self, path: Path | str = DB_PATH) -> None:
+    def __init__(
+        self,
+        path: Path | str = DB_PATH,
+        legacy_path: Path | str | None = None,
+    ) -> None:
         self.path = Path(path)
+        self.legacy_path = (
+            Path(legacy_path)
+            if legacy_path is not None
+            else self.path.with_name("leo.db")
+        )
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -93,6 +101,8 @@ class Database:
                     photo_file_id TEXT NOT NULL,
                     about TEXT NOT NULL,
                     looking_for TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1
+                        CHECK (is_active IN (0, 1)),
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -111,6 +121,121 @@ class Database:
                 );
                 """
             )
+            user_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(users)")
+            }
+            if "is_active" not in user_columns:
+                connection.execute(
+                    """
+                    ALTER TABLE users
+                    ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1
+                        CHECK (is_active IN (0, 1))
+                    """
+                )
+            self._migrate_legacy_database(connection)
+
+    def _migrate_legacy_database(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        if (
+            not self.legacy_path.exists()
+            or self.legacy_path.resolve() == self.path.resolve()
+        ):
+            return
+
+        connection.execute(
+            "ATTACH DATABASE ? AS legacy",
+            (str(self.legacy_path),),
+        )
+        try:
+            legacy_tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM legacy.sqlite_master WHERE type = 'table'"
+                )
+            }
+            if "users" not in legacy_tables:
+                return
+
+            legacy_user_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA legacy.table_info(users)")
+            }
+            required_user_columns = {
+                "telegram_id",
+                "name",
+                "age",
+                "gender",
+                "city",
+                "photo_file_id",
+                "about",
+                "looking_for",
+            }
+            if not required_user_columns.issubset(legacy_user_columns):
+                raise RuntimeError(
+                    "Cannot migrate leo.db: required profile columns are missing."
+                )
+
+            active_expression = (
+                "is_active" if "is_active" in legacy_user_columns else "1"
+            )
+            created_expression = (
+                "created_at"
+                if "created_at" in legacy_user_columns
+                else "CURRENT_TIMESTAMP"
+            )
+            updated_expression = (
+                "updated_at"
+                if "updated_at" in legacy_user_columns
+                else "CURRENT_TIMESTAMP"
+            )
+
+            with connection:
+                connection.execute(
+                    f"""
+                    INSERT OR IGNORE INTO main.users (
+                        telegram_id, name, age, gender, city, photo_file_id,
+                        about, looking_for, is_active, created_at, updated_at
+                    )
+                    SELECT telegram_id, name, age, gender, city, photo_file_id,
+                           about, looking_for, {active_expression},
+                           {created_expression}, {updated_expression}
+                    FROM legacy.users
+                    """
+                )
+
+                if "likes" in legacy_tables:
+                    legacy_like_columns = {
+                        row["name"]
+                        for row in connection.execute("PRAGMA legacy.table_info(likes)")
+                    }
+                    required_like_columns = {
+                        "from_user_id",
+                        "to_user_id",
+                        "is_like",
+                    }
+                    if not required_like_columns.issubset(legacy_like_columns):
+                        raise RuntimeError(
+                            "Cannot migrate leo.db: required like columns are missing."
+                        )
+                    like_created_expression = (
+                        "created_at"
+                        if "created_at" in legacy_like_columns
+                        else "CURRENT_TIMESTAMP"
+                    )
+                    connection.execute(
+                        f"""
+                        INSERT OR IGNORE INTO main.likes (
+                            from_user_id, to_user_id, is_like, created_at
+                        )
+                        SELECT from_user_id, to_user_id, is_like,
+                               {like_created_expression}
+                        FROM legacy.likes
+                        """
+                    )
+        finally:
+            connection.execute("DETACH DATABASE legacy")
 
     def get_user(self, telegram_id: int) -> dict[str, Any] | None:
         with closing(self.connect()) as connection:
@@ -151,6 +276,19 @@ class Database:
                         profile["looking_for"],
                     ),
                 )
+
+    def set_search_active(self, telegram_id: int, is_active: bool) -> bool:
+        with closing(self.connect()) as connection:
+            with connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE users
+                    SET is_active = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE telegram_id = ?
+                    """,
+                    (int(is_active), telegram_id),
+                )
+        return cursor.rowcount == 1
 
     def record_action(
         self,
@@ -203,6 +341,7 @@ class Database:
                 SELECT candidate.*
                 FROM users AS candidate
                 WHERE candidate.telegram_id != ?
+                  AND candidate.is_active = 1
                   AND NOT EXISTS (
                     SELECT 1
                     FROM likes
@@ -232,10 +371,13 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             ["Смотреть анкеты"],
-            ["Моя анкета", "Premium"],
+            ["Моя анкета"],
+            ["Не искать"],
+            ["Premium"],
         ],
         resize_keyboard=True,
         is_persistent=True,
+        one_time_keyboard=False,
     )
 
 
@@ -294,6 +436,33 @@ def profile_caption(profile: dict[str, Any]) -> str:
     return f"<b>{name}, {profile['age']}</b>\n{city}\n\n{about}"
 
 
+def own_profile_caption(profile: dict[str, Any]) -> str:
+    caption = profile_caption(profile)
+    if not profile["is_active"]:
+        caption += "\n\nАнкета скрыта из поиска."
+    return caption
+
+
+def edit_profile_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Изменить анкету", callback_data="profile:edit")]]
+    )
+
+
+async def send_own_profile(
+    chat_id: int,
+    profile: dict[str, Any],
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=profile["photo_file_id"],
+        caption=own_profile_caption(profile),
+        parse_mode=ParseMode.HTML,
+        reply_markup=edit_profile_keyboard(),
+    )
+
+
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -303,14 +472,21 @@ async def start(
     if not user or not message:
         return ConversationHandler.END
 
-    if get_database(context).get_user(user.id):
+    database = get_database(context)
+    profile = database.get_user(user.id)
+    if profile:
         await message.reply_text(
-            "Вы уже зарегистрированы. Выберите действие в меню.",
+            "Ваша сохранённая анкета:",
             reply_markup=main_menu(),
         )
+        await send_own_profile(message.chat_id, profile, context)
         return ConversationHandler.END
 
     context.user_data["registration"] = {}
+    await message.reply_text(
+        "Постоянная клавиатура доступна внизу экрана.",
+        reply_markup=main_menu(),
+    )
     await message.reply_text(
         "Перед регистрацией: анкета и фотография будут показаны другим "
         "подходящим пользователям. Бот предназначен только для взрослых "
@@ -340,7 +516,7 @@ async def accept_registration(
     if query.message:
         await query.message.reply_text(
             "Как вас зовут?",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=main_menu(),
         )
     return NAME
 
@@ -357,7 +533,7 @@ async def edit_profile(
     if query.message:
         await query.message.reply_text(
             "Обновим вашу анкету. Как вас зовут?",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=main_menu(),
         )
     return NAME
 
@@ -576,13 +752,22 @@ async def browse_profiles(
     chat = update.effective_chat
     if not user or not chat:
         return
-    if not get_database(context).get_user(user.id):
+    database = get_database(context)
+    viewer = database.get_user(user.id)
+    if not viewer:
         await context.bot.send_message(
             chat_id=chat.id,
             text="Сначала создайте анкету командой /start.",
             reply_markup=main_menu(),
         )
         return
+    if not viewer["is_active"]:
+        database.set_search_active(user.id, True)
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="Поиск включён. Ваша анкета снова показывается другим пользователям.",
+            reply_markup=main_menu(),
+        )
     await send_next_profile(chat.id, user.id, context)
 
 
@@ -603,14 +788,48 @@ async def show_my_profile(
         )
         return
 
-    await context.bot.send_photo(
+    await context.bot.send_message(
         chat_id=chat.id,
-        photo=profile["photo_file_id"],
-        caption=profile_caption(profile),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Изменить анкету", callback_data="profile:edit")]]
-        ),
+        text="Ваша сохранённая анкета:",
+        reply_markup=main_menu(),
+    )
+    await send_own_profile(chat.id, profile, context)
+
+
+async def stop_search(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat:
+        return
+
+    database = get_database(context)
+    profile = database.get_user(user.id)
+    if not profile:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="Сначала создайте анкету командой /start.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if profile["is_active"]:
+        database.set_search_active(user.id, False)
+        text = (
+            "Поиск выключен. Ваша анкета скрыта от других пользователей. "
+            "Чтобы вернуться, нажмите «Смотреть анкеты»."
+        )
+    else:
+        text = (
+            "Поиск уже выключен. Чтобы вернуться и снова показывать анкету, "
+            "нажмите «Смотреть анкеты»."
+        )
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text=text,
+        reply_markup=main_menu(),
     )
 
 
@@ -742,6 +961,9 @@ def build_application(token: str) -> Application:
     )
     application.add_handler(
         MessageHandler(filters.Regex(r"^Моя анкета$"), show_my_profile)
+    )
+    application.add_handler(
+        MessageHandler(filters.Regex(r"^Не искать$"), stop_search)
     )
     application.add_handler(
         MessageHandler(filters.Regex(r"^Premium$"), show_premium)
