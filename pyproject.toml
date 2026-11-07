@@ -1,0 +1,11 @@
+[project]
+name = "leo-telegram-dating-bot"
+version = "0.1.0"
+description = "A polling Telegram dating bot with SQLite profiles and likes."
+requires-python = ">=3.11"
+dependencies = [
+    "python-telegram-bot>=22.8",
+]
+
+[tool.uv]
+package = false

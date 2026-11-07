@@ -1,9 +1,13 @@
-# [Project name]
+# Leo Telegram Dating Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A Telegram dating bot with profile registration, random profile browsing, likes, mutual-match notifications, and SQLite storage.
 
 ## Run & Operate
 
+- `uv run python main.py` — start the bot with Telegram long polling
+- `uv run python -m unittest -v` — run the local checks
+- Required secret: `TELEGRAM_TOKEN`
+- SQLite data is stored in `leo.db` (created on first run)
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
@@ -22,23 +26,29 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `main.py` — Telegram bot, registration flow, profile browsing, and SQLite data layer
+- `test_main.py` — database and matching behavior checks
+- `pyproject.toml` / `uv.lock` — Python dependency manifest and lockfile
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Telegram Bot API long polling is used; no webhook server is required.
+- Profile photos are stored as Telegram `file_id` values, not downloaded image files.
+- Profile details and likes are persisted in the local SQLite database.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Users register an adult dating profile, browse mutually compatible profiles, and like or pass.
+- A mutual like sends a notification to both users.
+- Premium information points users to `@leo_admin`; payment is not processed in the bot.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Keep the bot entry point in `main.py` and read its token from `TELEGRAM_TOKEN`.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Start only one polling instance per Telegram bot token.
 
 ## Pointers
 

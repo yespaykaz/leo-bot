@@ -16,6 +16,13 @@ out-tsc
 
 # dependencies
 node_modules
+.pythonlibs/
+.venv/
+__pycache__/
+*.py[cod]
+leo.db
+leo.db-shm
+leo.db-wal
 
 # IDEs and editors
 /.idea
