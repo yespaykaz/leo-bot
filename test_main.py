@@ -178,7 +178,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertFalse(keyboard.one_time_keyboard)
         self.assertEqual(len(keyboard.keyboard), 1)
         self.assertEqual(len(keyboard.keyboard[0]), 5)
-        self.assertEqual(labels, ["1 🚀", "2", "3", "4", "5"])
+        self.assertEqual(labels, ["1", "2", "3", "4", "5"])
         self.assertEqual(
             HOME_MENU_TEXT,
             "Подождем пока кто-то увидит твою анкету\n\n"

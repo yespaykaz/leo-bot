@@ -50,7 +50,7 @@ HOME_MENU_TEXT = (
     "***\n"
     "5. Активируй Premium — будь в топе ⭐️."
 )
-MENU_BUTTON_PATTERN = r"^(1 🚀|2|3|4|5)$"
+MENU_BUTTON_PATTERN = r"^(1|2|3|4|5)$"
 MENU_BUTTON_FILTER = filters.Regex(MENU_BUTTON_PATTERN)
 TEXT_INPUT_FILTER = filters.TEXT & ~filters.COMMAND & ~MENU_BUTTON_FILTER
 
@@ -481,7 +481,7 @@ def get_database(context: ContextTypes.DEFAULT_TYPE) -> Database:
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            ["1 🚀", "2", "3", "4", "5"],
+            ["1", "2", "3", "4", "5"],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -964,12 +964,12 @@ async def stop_search(
         database.set_search_active(user.id, False)
         text = (
             "Поиск выключен. Ваша анкета скрыта от других пользователей. "
-            "Чтобы вернуться, нажмите 1 🚀."
+            "Чтобы вернуться, нажмите 1."
         )
     else:
         text = (
             "Поиск уже выключен. Чтобы вернуться и снова показывать анкету, "
-            "нажмите 1 🚀."
+            "нажмите 1."
         )
     await context.bot.send_message(
         chat_id=chat.id,
@@ -1251,7 +1251,7 @@ def build_application(token: str) -> Application:
     application.add_handler(registration)
     application.add_handler(CommandHandler("premium", show_premium))
     application.add_handler(
-        MessageHandler(filters.Regex(r"^1 🚀$"), browse_profiles)
+        MessageHandler(filters.Regex(r"^1$"), browse_profiles)
     )
     application.add_handler(
         MessageHandler(filters.Regex(r"^2$"), show_my_profile)

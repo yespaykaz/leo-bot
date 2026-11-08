@@ -22,7 +22,7 @@ database or the Telegram token.
 - Random compatible profiles with Like and Dislike actions
 - Mutual-like notifications to both users
 - Profile display and editing
-- Persistent one-row menu: `1 🚀` browse, `2` profile, `3` pause, `4` edit, `5` Premium
+- Persistent one-row menu: `1` browse, `2` profile, `3` pause, `4` edit, `5` Premium
 - Premium information: 2000 tenge per week, contact `@leoqazaq`
 
 Run the local checks with:
