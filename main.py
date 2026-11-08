@@ -39,7 +39,15 @@ logger = logging.getLogger("leo_bot")
 
 CONSENT, NAME, AGE, GENDER, CITY, PHOTO, ABOUT, LOOKING_FOR = range(8)
 DB_PATH = Path(__file__).with_name("bot.db")
-MUTUAL_LIKE_MESSAGE = "У ВАС ВЗАИМНАЯ СИМПАТИЯ!"
+MUTUAL_LIKE_MESSAGE = (
+    "У ВАС ВЗАИМНАЯ СИМПАТИЯ! ❤️\n"
+    "Вы понравились друг другу!"
+)
+USERNAME_REQUIRED_TEXT = (
+    "Для регистрации и обмена контактами при взаимной симпатии добавьте "
+    "username в Telegram: Настройки → Имя пользователя. Затем нажмите /start "
+    "ещё раз."
+)
 PREMIUM_TEXT = "Premium стоит 2000 тенге в неделю. Для подключения напишите @leoqazaq."
 HOME_MENU_TEXT = (
     "Подождем пока кто-то увидит твою анкету\n\n"
@@ -113,6 +121,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS users (
                     telegram_id INTEGER PRIMARY KEY,
+                    username TEXT,
                     name TEXT NOT NULL,
                     age INTEGER NOT NULL CHECK (age BETWEEN 18 AND 99),
                     gender TEXT NOT NULL,
@@ -136,6 +145,18 @@ class Database:
                     FOREIGN KEY (from_user_id) REFERENCES users (telegram_id)
                         ON DELETE CASCADE,
                     FOREIGN KEY (to_user_id) REFERENCES users (telegram_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS matches (
+                    first_user_id INTEGER NOT NULL,
+                    second_user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (first_user_id, second_user_id),
+                    CHECK (first_user_id < second_user_id),
+                    FOREIGN KEY (first_user_id) REFERENCES users (telegram_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (second_user_id) REFERENCES users (telegram_id)
                         ON DELETE CASCADE
                 );
 
@@ -176,7 +197,12 @@ class Database:
                         CHECK (is_active IN (0, 1))
                     """
                 )
+            if "username" not in user_columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN username TEXT"
+                )
             self._migrate_legacy_database(connection)
+            self._backfill_mutual_likes(connection)
 
     def _migrate_legacy_database(
         self,
@@ -224,6 +250,9 @@ class Database:
             active_expression = (
                 "is_active" if "is_active" in legacy_user_columns else "1"
             )
+            username_expression = (
+                "username" if "username" in legacy_user_columns else "NULL"
+            )
             created_expression = (
                 "created_at"
                 if "created_at" in legacy_user_columns
@@ -239,12 +268,14 @@ class Database:
                 connection.execute(
                     f"""
                     INSERT OR IGNORE INTO main.users (
-                        telegram_id, name, age, gender, city, photo_file_id,
-                        about, looking_for, is_active, created_at, updated_at
+                        telegram_id, username, name, age, gender, city,
+                        photo_file_id, about, looking_for, is_active,
+                        created_at, updated_at
                     )
-                    SELECT telegram_id, name, age, gender, city, photo_file_id,
-                           about, looking_for, {active_expression},
-                           {created_expression}, {updated_expression}
+                    SELECT telegram_id, {username_expression}, name, age,
+                           gender, city, photo_file_id, about, looking_for,
+                           {active_expression}, {created_expression},
+                           {updated_expression}
                     FROM legacy.users
                     """
                 )
@@ -281,6 +312,23 @@ class Database:
         finally:
             connection.execute("DETACH DATABASE legacy")
 
+    @staticmethod
+    def _backfill_mutual_likes(connection: sqlite3.Connection) -> None:
+        with connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO matches (first_user_id, second_user_id)
+                SELECT outgoing.from_user_id, outgoing.to_user_id
+                FROM likes AS outgoing
+                JOIN likes AS incoming
+                  ON incoming.from_user_id = outgoing.to_user_id
+                 AND incoming.to_user_id = outgoing.from_user_id
+                WHERE outgoing.is_like = 1
+                  AND incoming.is_like = 1
+                  AND outgoing.from_user_id < outgoing.to_user_id
+                """
+            )
+
     def get_user(self, telegram_id: int) -> dict[str, Any] | None:
         with closing(self.connect()) as connection:
             row = connection.execute(
@@ -295,11 +343,12 @@ class Database:
                 connection.execute(
                     """
                     INSERT INTO users (
-                        telegram_id, name, age, gender, city,
+                        telegram_id, username, name, age, gender, city,
                         photo_file_id, about, looking_for
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (telegram_id) DO UPDATE SET
+                        username = excluded.username,
                         name = excluded.name,
                         age = excluded.age,
                         gender = excluded.gender,
@@ -311,6 +360,7 @@ class Database:
                     """,
                     (
                         telegram_id,
+                        profile.get("username"),
                         profile["name"],
                         profile["age"],
                         profile["gender"],
@@ -320,6 +370,26 @@ class Database:
                         profile["looking_for"],
                     ),
                 )
+
+    def update_username(
+        self,
+        telegram_id: int,
+        username: str | None,
+    ) -> bool:
+        normalized = username.strip().removeprefix("@") if username else None
+        if normalized == "":
+            normalized = None
+        with closing(self.connect()) as connection:
+            with connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE users
+                    SET username = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE telegram_id = ?
+                    """,
+                    (normalized, telegram_id),
+                )
+        return cursor.rowcount == 1
 
     def set_search_active(self, telegram_id: int, is_active: bool) -> bool:
         with closing(self.connect()) as connection:
@@ -370,6 +440,34 @@ class Database:
                 )
                 """,
                 (first_user_id, second_user_id),
+            ).fetchone()
+        return bool(row[0])
+
+    def record_match(self, first_user_id: int, second_user_id: int) -> bool:
+        first_id, second_id = sorted((first_user_id, second_user_id))
+        with closing(self.connect()) as connection:
+            with connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO matches (first_user_id, second_user_id)
+                    VALUES (?, ?)
+                    ON CONFLICT (first_user_id, second_user_id) DO NOTHING
+                    """,
+                    (first_id, second_id),
+                )
+        return cursor.rowcount == 1
+
+    def has_match(self, first_user_id: int, second_user_id: int) -> bool:
+        first_id, second_id = sorted((first_user_id, second_user_id))
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM matches
+                    WHERE first_user_id = ? AND second_user_id = ?
+                )
+                """,
+                (first_id, second_id),
             ).fetchone()
         return bool(row[0])
 
@@ -442,6 +540,8 @@ class Database:
                 FROM users AS candidate
                 WHERE candidate.telegram_id != ?
                   AND candidate.is_active = 1
+                  AND candidate.username IS NOT NULL
+                  AND TRIM(candidate.username) != ''
                   AND NOT EXISTS (
                     SELECT 1
                     FROM likes
@@ -476,6 +576,12 @@ class Database:
 
 def get_database(context: ContextTypes.DEFAULT_TYPE) -> Database:
     return context.application.bot_data["database"]
+
+
+def sync_telegram_username(database: Database, user: Any) -> bool:
+    username = getattr(user, "username", None)
+    database.update_username(user.id, username)
+    return bool(username and username.strip())
 
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -582,6 +688,19 @@ def own_profile_text(profile: dict[str, Any]) -> str:
     )
 
 
+def build_mutual_like_message(profile: dict[str, Any]) -> str:
+    username = str(profile.get("username") or "").strip().removeprefix("@")
+    if not username:
+        raise ValueError("Mutual-like contacts require a Telegram username.")
+    return (
+        f"{MUTUAL_LIKE_MESSAGE}\n\n"
+        f"Анкета: {profile['name']}, {profile['age']}, {profile['city']}\n"
+        f"Юзернейм: @{username}\n"
+        f"Ссылка: https://t.me/{username}\n"
+        "Напишите друг другу!"
+    )
+
+
 async def send_home_menu(
     chat_id: int,
     context: ContextTypes.DEFAULT_TYPE,
@@ -591,6 +710,18 @@ async def send_home_menu(
         text=HOME_MENU_TEXT,
         reply_markup=main_menu(),
     )
+
+
+async def send_username_required(
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=USERNAME_REQUIRED_TEXT,
+        reply_markup=main_menu(),
+    )
+    await send_home_menu(chat_id, context)
 
 
 async def send_own_profile(
@@ -620,6 +751,9 @@ async def start(
         return ConversationHandler.END
 
     database = get_database(context)
+    if not sync_telegram_username(database, user):
+        await send_username_required(message.chat_id, context)
+        return ConversationHandler.END
     profile = database.get_user(user.id)
     if profile:
         await send_own_profile(message.chat_id, profile, context)
@@ -673,6 +807,13 @@ async def edit_profile(
         await query.answer()
         message = query.message
     if not message:
+        return ConversationHandler.END
+    user = update.effective_user
+    if not user:
+        return ConversationHandler.END
+    database = get_database(context)
+    if not sync_telegram_username(database, user):
+        await send_username_required(message.chat_id, context)
         return ConversationHandler.END
     context.user_data["registration"] = {}
     await message.reply_text(
@@ -840,8 +981,16 @@ async def receive_looking_for(
         context.user_data.pop("registration", None)
         return ConversationHandler.END
 
+    database = get_database(context)
+    if not sync_telegram_username(database, user):
+        context.user_data.pop("registration", None)
+        if query.message:
+            await send_username_required(query.message.chat_id, context)
+        return ConversationHandler.END
+
+    registration["username"] = user.username.strip().removeprefix("@")
     registration["looking_for"] = LOOKING_FOR_OPTIONS[key]
-    get_database(context).save_profile(user.id, registration)
+    database.save_profile(user.id, registration)
     context.user_data.pop("registration", None)
     if query.message:
         await query.message.reply_text(
@@ -900,6 +1049,9 @@ async def browse_profiles(
     if not user or not chat:
         return
     database = get_database(context)
+    if not sync_telegram_username(database, user):
+        await send_username_required(chat.id, context)
+        return
     viewer = database.get_user(user.id)
     if not viewer:
         await context.bot.send_message(
@@ -928,7 +1080,9 @@ async def show_my_profile(
     chat = update.effective_chat
     if not user or not chat:
         return
-    profile = get_database(context).get_user(user.id)
+    database = get_database(context)
+    sync_telegram_username(database, user)
+    profile = database.get_user(user.id)
     if not profile:
         await context.bot.send_message(
             chat_id=chat.id,
@@ -1161,6 +1315,16 @@ async def profile_action(
         return
 
     database = get_database(context)
+    if not sync_telegram_username(database, user):
+        await query.answer(
+            "Добавьте username в настройках Telegram, чтобы использовать лайки.",
+            show_alert=True,
+        )
+        chat = update.effective_chat
+        if chat:
+            await send_username_required(chat.id, context)
+        return
+
     viewer = database.get_user(user.id)
     candidate = database.get_user(target_id)
     if (
@@ -1171,6 +1335,13 @@ async def profile_action(
         or database.is_blocked_between(user.id, target_id)
     ):
         await query.answer("Анкета недоступна.", show_alert=True)
+        return
+
+    if action == "like" and not candidate.get("username"):
+        await query.answer(
+            "У этой анкеты пока нет username, поэтому контакт не получится передать.",
+            show_alert=True,
+        )
         return
 
     added = database.record_action(
@@ -1189,14 +1360,25 @@ async def profile_action(
         pass
 
     if action == "like" and database.has_mutual_like(user.id, target_id):
-        for recipient_id in (user.id, target_id):
-            try:
-                await context.bot.send_message(
-                    chat_id=recipient_id,
-                    text=MUTUAL_LIKE_MESSAGE,
-                )
-            except TelegramError:
-                logger.info("Could not deliver a match notification.")
+        if database.record_match(user.id, target_id):
+            recipients = (
+                (user.id, candidate),
+                (target_id, viewer),
+            )
+            for recipient_id, other_profile in recipients:
+                try:
+                    await context.bot.send_message(
+                        chat_id=recipient_id,
+                        text=build_mutual_like_message(other_profile),
+                    )
+                except TelegramError:
+                    logger.info("Could not deliver a match notification.")
+                try:
+                    await send_home_menu(recipient_id, context)
+                except TelegramError:
+                    logger.info("Could not deliver the menu after a match.")
+
+        return
 
     chat = update.effective_chat
     if chat:
