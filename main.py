@@ -41,6 +41,18 @@ CONSENT, NAME, AGE, GENDER, CITY, PHOTO, ABOUT, LOOKING_FOR = range(8)
 DB_PATH = Path(__file__).with_name("bot.db")
 MUTUAL_LIKE_MESSAGE = "У ВАС ВЗАИМНАЯ СИМПАТИЯ!"
 PREMIUM_TEXT = "Premium стоит 2000 тенге в неделю. Для подключения напишите @leoqazaq."
+HOME_MENU_TEXT = (
+    "Подождем пока кто-то увидит твою анкету\n\n"
+    "1. Смотреть анкеты.\n"
+    "2. Моя анкета.\n"
+    "3. Я больше не хочу никого искать.\n"
+    "4. Изменить анкету.\n"
+    "***\n"
+    "5. Активируй Premium — будь в топе ⭐️."
+)
+MENU_BUTTON_PATTERN = r"^(1 🚀|2|3|4|5)$"
+MENU_BUTTON_FILTER = filters.Regex(MENU_BUTTON_PATTERN)
+TEXT_INPUT_FILTER = filters.TEXT & ~filters.COMMAND & ~MENU_BUTTON_FILTER
 
 GENDERS = {
     "man": "Мужчина",
@@ -469,10 +481,7 @@ def get_database(context: ContextTypes.DEFAULT_TYPE) -> Database:
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            ["Смотреть анкеты"],
-            ["Моя анкета"],
-            ["Не искать"],
-            ["Premium"],
+            ["1 🚀", "2", "3", "4", "5"],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -533,7 +542,6 @@ def profile_keyboard(profile_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"report:{profile_id}",
                 ),
             ],
-            [InlineKeyboardButton("Premium", callback_data="premium")],
         ]
     )
 
@@ -567,16 +575,21 @@ def profile_caption(profile: dict[str, Any]) -> str:
     return f"<b>{name}, {profile['age']}</b>\n{city}\n\n{about}"
 
 
-def own_profile_caption(profile: dict[str, Any]) -> str:
-    caption = profile_caption(profile)
-    if not profile["is_active"]:
-        caption += "\n\nАнкета скрыта из поиска."
-    return caption
+def own_profile_text(profile: dict[str, Any]) -> str:
+    return (
+        f"{profile['name']}, {profile['age']}, {profile['city']} — "
+        f"{profile['about']}"
+    )
 
 
-def edit_profile_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Изменить анкету", callback_data="profile:edit")]]
+async def send_home_menu(
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=HOME_MENU_TEXT,
+        reply_markup=main_menu(),
     )
 
 
@@ -588,10 +601,13 @@ async def send_own_profile(
     await context.bot.send_photo(
         chat_id=chat_id,
         photo=profile["photo_file_id"],
-        caption=own_profile_caption(profile),
-        parse_mode=ParseMode.HTML,
-        reply_markup=edit_profile_keyboard(),
     )
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=own_profile_text(profile),
+        reply_markup=main_menu(),
+    )
+    await send_home_menu(chat_id, context)
 
 
 async def start(
@@ -606,18 +622,11 @@ async def start(
     database = get_database(context)
     profile = database.get_user(user.id)
     if profile:
-        await message.reply_text(
-            "Ваша сохранённая анкета:",
-            reply_markup=main_menu(),
-        )
         await send_own_profile(message.chat_id, profile, context)
         return ConversationHandler.END
 
     context.user_data["registration"] = {}
-    await message.reply_text(
-        "Постоянная клавиатура доступна внизу экрана.",
-        reply_markup=main_menu(),
-    )
+    await send_home_menu(message.chat_id, context)
     await message.reply_text(
         "Перед регистрацией: анкета и фотография будут показаны другим "
         "подходящим пользователям. Бот предназначен только для взрослых "
@@ -642,6 +651,7 @@ async def accept_registration(
                 "Регистрация отменена.",
                 reply_markup=main_menu(),
             )
+            await send_home_menu(query.message.chat_id, context)
         return ConversationHandler.END
 
     if query.message:
@@ -649,6 +659,7 @@ async def accept_registration(
             "Как вас зовут?",
             reply_markup=main_menu(),
         )
+        await send_home_menu(query.message.chat_id, context)
     return NAME
 
 
@@ -657,15 +668,18 @@ async def edit_profile(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     query = update.callback_query
-    if not query:
+    message = update.effective_message
+    if query:
+        await query.answer()
+        message = query.message
+    if not message:
         return ConversationHandler.END
-    await query.answer()
     context.user_data["registration"] = {}
-    if query.message:
-        await query.message.reply_text(
-            "Обновим вашу анкету. Как вас зовут?",
-            reply_markup=main_menu(),
-        )
+    await message.reply_text(
+        "Обновим вашу анкету. Как вас зовут?",
+        reply_markup=main_menu(),
+    )
+    await send_home_menu(message.chat_id, context)
     return NAME
 
 
@@ -834,6 +848,7 @@ async def receive_looking_for(
             "Анкета сохранена. Выберите действие в меню.",
             reply_markup=main_menu(),
         )
+        await send_home_menu(query.message.chat_id, context)
     return ConversationHandler.END
 
 
@@ -847,6 +862,7 @@ async def cancel(
             "Регистрация отменена.",
             reply_markup=main_menu(),
         )
+        await send_home_menu(update.effective_message.chat_id, context)
     return ConversationHandler.END
 
 
@@ -891,6 +907,7 @@ async def browse_profiles(
             text="Сначала создайте анкету командой /start.",
             reply_markup=main_menu(),
         )
+        await send_home_menu(chat.id, context)
         return
     if not viewer["is_active"]:
         database.set_search_active(user.id, True)
@@ -900,6 +917,7 @@ async def browse_profiles(
             reply_markup=main_menu(),
         )
     await send_next_profile(chat.id, user.id, context)
+    await send_home_menu(chat.id, context)
 
 
 async def show_my_profile(
@@ -917,13 +935,8 @@ async def show_my_profile(
             text="Сначала создайте анкету командой /start.",
             reply_markup=main_menu(),
         )
+        await send_home_menu(chat.id, context)
         return
-
-    await context.bot.send_message(
-        chat_id=chat.id,
-        text="Ваша сохранённая анкета:",
-        reply_markup=main_menu(),
-    )
     await send_own_profile(chat.id, profile, context)
 
 
@@ -944,24 +957,26 @@ async def stop_search(
             text="Сначала создайте анкету командой /start.",
             reply_markup=main_menu(),
         )
+        await send_home_menu(chat.id, context)
         return
 
     if profile["is_active"]:
         database.set_search_active(user.id, False)
         text = (
             "Поиск выключен. Ваша анкета скрыта от других пользователей. "
-            "Чтобы вернуться, нажмите «Смотреть анкеты»."
+            "Чтобы вернуться, нажмите 1 🚀."
         )
     else:
         text = (
             "Поиск уже выключен. Чтобы вернуться и снова показывать анкету, "
-            "нажмите «Смотреть анкеты»."
+            "нажмите 1 🚀."
         )
     await context.bot.send_message(
         chat_id=chat.id,
         text=text,
         reply_markup=main_menu(),
     )
+    await send_home_menu(chat.id, context)
 
 
 async def show_premium(
@@ -976,6 +991,7 @@ async def show_premium(
                 PREMIUM_TEXT,
                 reply_markup=main_menu(),
             )
+            await send_home_menu(query.message.chat_id, context)
         return
 
     chat = update.effective_chat
@@ -985,6 +1001,7 @@ async def show_premium(
             text=PREMIUM_TEXT,
             reply_markup=main_menu(),
         )
+        await send_home_menu(chat.id, context)
 
 
 async def block_profile(
@@ -1023,6 +1040,7 @@ async def block_profile(
     chat = update.effective_chat
     if chat:
         await send_next_profile(chat.id, user.id, context)
+        await send_home_menu(chat.id, context)
 
 
 async def begin_report(
@@ -1053,6 +1071,9 @@ async def begin_report(
     await query.edit_message_reply_markup(
         reply_markup=report_reason_keyboard(target_id)
     )
+    chat = update.effective_chat
+    if chat:
+        await send_home_menu(chat.id, context)
 
 
 async def cancel_report(
@@ -1073,6 +1094,9 @@ async def cancel_report(
         )
     except TelegramError:
         pass
+    chat = update.effective_chat
+    if chat:
+        await send_home_menu(chat.id, context)
 
 
 async def submit_report(
@@ -1117,6 +1141,7 @@ async def submit_report(
     chat = update.effective_chat
     if chat:
         await send_next_profile(chat.id, user.id, context)
+        await send_home_menu(chat.id, context)
 
 
 async def profile_action(
@@ -1176,6 +1201,7 @@ async def profile_action(
     chat = update.effective_chat
     if chat:
         await send_next_profile(chat.id, user.id, context)
+        await send_home_menu(chat.id, context)
 
 
 async def on_error(
@@ -1195,20 +1221,24 @@ def build_application(token: str) -> Application:
         entry_points=[
             CommandHandler("start", start),
             CallbackQueryHandler(edit_profile, pattern=r"^profile:edit$"),
+            MessageHandler(filters.Regex(r"^4$"), edit_profile),
         ],
         states={
             CONSENT: [
                 CallbackQueryHandler(accept_registration, pattern=r"^consent:")
             ],
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_name)],
-            AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_age)],
+            NAME: [MessageHandler(TEXT_INPUT_FILTER, receive_name)],
+            AGE: [MessageHandler(TEXT_INPUT_FILTER, receive_age)],
             GENDER: [CallbackQueryHandler(receive_gender, pattern=r"^gender:")],
-            CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_city)],
+            CITY: [MessageHandler(TEXT_INPUT_FILTER, receive_city)],
             PHOTO: [
                 MessageHandler(filters.PHOTO, receive_photo),
-                MessageHandler(filters.ALL & ~filters.COMMAND, remind_photo),
+                MessageHandler(
+                    filters.ALL & ~filters.COMMAND & ~MENU_BUTTON_FILTER,
+                    remind_photo,
+                ),
             ],
-            ABOUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_about)],
+            ABOUT: [MessageHandler(TEXT_INPUT_FILTER, receive_about)],
             LOOKING_FOR: [
                 CallbackQueryHandler(receive_looking_for, pattern=r"^looking:")
             ],
@@ -1221,16 +1251,16 @@ def build_application(token: str) -> Application:
     application.add_handler(registration)
     application.add_handler(CommandHandler("premium", show_premium))
     application.add_handler(
-        MessageHandler(filters.Regex(r"^Смотреть анкеты$"), browse_profiles)
+        MessageHandler(filters.Regex(r"^1 🚀$"), browse_profiles)
     )
     application.add_handler(
-        MessageHandler(filters.Regex(r"^Моя анкета$"), show_my_profile)
+        MessageHandler(filters.Regex(r"^2$"), show_my_profile)
     )
     application.add_handler(
-        MessageHandler(filters.Regex(r"^Не искать$"), stop_search)
+        MessageHandler(filters.Regex(r"^3$"), stop_search)
     )
     application.add_handler(
-        MessageHandler(filters.Regex(r"^Premium$"), show_premium)
+        MessageHandler(filters.Regex(r"^5$"), show_premium)
     )
     application.add_handler(
         CallbackQueryHandler(block_profile, pattern=r"^block:\d+$")

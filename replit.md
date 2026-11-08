@@ -36,6 +36,7 @@ A Telegram dating bot with profile registration, random profile browsing, likes,
 - Profile photos are stored as Telegram `file_id` values, not downloaded image files.
 - Profile details, likes, and search visibility are persisted in `bot.db`.
 - On first start with the new database name, existing records are copied from `leo.db`; the source file is kept.
+- The persistent reply keyboard contains only `1 🚀`, `2`, `3`, `4`, and `5`, mapped to browse, profile, pause, edit, and Premium.
 
 ## Product
 
